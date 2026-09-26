@@ -1,0 +1,129 @@
+import yaml
+import uuid
+import os
+import socket
+import telnetlib
+import time
+import requests
+import argparse
+from datetime import datetime
+
+url =os.getenv('NOTIFY_URL',"http://172.16.0.65:5003/send-notification")
+#"http://172.16.0.65:5003/send-notification"
+
+def load_config(file_path):
+    with open(file_path, 'r') as file:
+        return yaml.safe_load(file)
+
+def compile_telnet_results(hosts_ports, timeout=5):
+    results = []
+    failed_hosts = []
+    overall_success = True
+
+    for host_info in hosts_ports['connections']:
+        host = host_info['host']a
+        for port_info in host_info['ports']:
+            port = port_info['port']
+            remark = port_info.get('remark', 'No remark')
+            result = {'host': host, 'port': port, 'remark': remark}
+
+            try:
+                with telnetlib.Telnet(host, port, timeout):
+                    result.update({
+                        'isSuccess': True, 'status_msg': 'Connected',
+                        'status': 2, 'err_msg': 'NA'
+                    })
+                    print(f"✅ Connected to {host}:{port}")
+            except Exception as e:
+                result.update({
+                    'isSuccess': False, 'status_msg': 'Failed',
+                    'status': 0, 'err_msg': str(e)
+                })
+                failed_hosts.append({
+                    'host': host, 'port': port,
+                    'Description': remark, 'error': str(e)
+                })
+                overall_success = False
+                print(f"❌ Failed {host}:{port} - {e}")
+
+            results.append(result)
+            time.sleep(1)
+
+    return results, overall_success, failed_hosts
+
+def send_to_notify(all_results):
+    headers = {'Content-Type': 'application/json'}
+
+    for item in all_results:
+        print(f"item['status']---> {item['status']}")
+        alert_data = {
+            "event_id": f"telnet_{item['host']}_{item['port']}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "title": f"Telnet Status: {item['host']}:{item['port']}",
+            "data": {
+                "host": item['host'],
+                "port": item['port'],
+                "description": item['remark'],
+                "error": item['err_msg'],
+                "status": int(item['status'])
+            },
+            "priority": "high",
+            "escalation_required": True,
+            "medium": "email",
+            "source": "TelnetCheck",
+        }
+        print("Sending alert:", alert_data)
+        try:
+            response = requests.post(url, json=alert_data, headers=headers)
+            print("Alert sent!" if response.status_code == 200 else f"Failed: {response.text}")
+        except Exception as e:
+            print("❗ Exception sending alert:", e)
+
+def send_summary_to_notify(all_results,success):
+    print(f"Success -> {success}")
+    if success:
+        status=2
+    else:
+        status=0
+    headers = {'Content-Type': 'application/json'}
+
+    summary = {
+        "event_id": f"telnet_summary_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "title": "Telnet Summary Report",
+        "data": {
+            "hosts": all_results,
+            "status":status,
+            "isSummary": True
+        },
+        "priority": "medium",
+        "escalation_required": False,
+        "medium": "email",
+        "source": "TelnetCheck",
+        "status":status
+    }
+
+    print("Sending summary...")
+    try:
+        response = requests.post(url, json=summary, headers=headers)
+        print("Summary sent!" if response.status_code == 200 else f"Failed: {response.text}")
+    except Exception as e:
+        print("❗ Exception sending summary:", e)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Telnet Checker')
+    parser.add_argument('--summary', action='store_true', help='Send a summary report instead of individual alerts')
+    parser.add_argument('--config', default='telnet.yml', help='Path to YAML configuration file')
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    if not config:
+        print("❌ No configuration loaded.")
+        exit(1)
+
+    results, success, failed = compile_telnet_results(config)
+
+    if args.summary:
+        send_summary_to_notify(results,success)
+    else:
+        send_to_notify(results)
+
+

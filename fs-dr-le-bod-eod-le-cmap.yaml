@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bod-env-details
+  namespace: fs-dr-le
+data:
+  telnet_enabled: "yes"
+  # Per-port telnet alert mail gate (telnet_checker.py). The check itself runs
+  # 24x7 for the BOD dashboard; only mail is limited to down ports inside this
+  # window (inclusive, IST). alert_window_enabled=no mails down ports 24x7.
+  alert_window_enabled: "yes"
+  alert_window_start: "09:00"
+  alert_window_end: "23:30"
+  # Summary digest cron "MIN HOUR" (IST). Telnet digest lands before the window opens.
+  url_summary_cron: "00 12"
+  telnet_summary_cron: "45 8"
+  mq_host: "mq"
+  redis_host: "redis"

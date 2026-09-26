@@ -1,0 +1,179 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: 'true'
+  labels:
+    app: bod-eod-le
+  name: bod-eod-le
+  namespace: fs-dr-le
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: bod-eod-le
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-07-16T10:06:07+05:30'
+      labels:
+        app: bod-eod-le
+    spec:
+      containers:
+      - command:
+        - /bin/bash
+        - -c
+        - |
+          #!/bin/bash
+          # --- env-aware entrypoint: cron env (persists across restarts) ---
+
+          # 1) dump container env for cron jobs (fixes Redis push -> LE update)
+          /usr/bin/python3 -c 'import os,shlex
+          skip={"HOME","PWD","SHLVL","_","OLDPWD"}
+          with open("/etc/bod.env","w") as f:
+              for k,v in os.environ.items():
+                  if k not in skip:
+                      f.write("export %s=%s\n"%(k,shlex.quote(v)))'
+          chmod 644 /etc/bod.env
+
+          # 2) build crontab (each line sources env). Scripts are plain .py sources under
+          # /data/overlayFiles/, run directly with python3 (PyInstaller bootloaders
+          # don't run on this infrastructure - see Dockerfile).
+          # Summary schedules are cron "MIN HOUR" pairs from the bod-env-details
+          # ConfigMap (URL_SUMMARY_CRON / TELNET_SUMMARY_CRON). The telnet digest
+          # defaults to 08:45 so it lands before the per-port alert window
+          # (ALERT_WINDOW_START, default 09:00) opens. Per-port telnet mail is gated
+          # inside telnet_checker.py (down ports only, inside the window); the
+          # */2 check itself still runs 24x7 so the BOD dashboard keeps updating.
+          URL_SUMMARY_CRON="${URL_SUMMARY_CRON:-00 12}"
+          TELNET_SUMMARY_CRON="${TELNET_SUMMARY_CRON:-45 8}"
+          CRON_FILE=/var/spool/cron/crontabs/root
+          touch /var/log/cron.log; chmod 666 /var/log/cron.log
+          mkdir -p /var/spool/cron/crontabs; chmod -R 777 /var/spool/cron/crontabs
+          rm -f "$CRON_FILE"
+          SRC=". /etc/bod.env;"
+          echo "*/2 * * * * $SRC /usr/bin/python3 /data/overlayFiles/urlchecker.py > /tmp/urlchecker.log 2>&1" >> "$CRON_FILE"
+          echo "00 07 * * * $SRC /usr/bin/python3 /data/overlayFiles/holiday_checker.py > /tmp/holiday_checker.log 2>&1" >> "$CRON_FILE"
+          echo "${URL_SUMMARY_CRON} * * * $SRC /usr/bin/python3 /data/overlayFiles/urlchecker.py --summary > /tmp/urlchecker_1.log 2>&1" >> "$CRON_FILE"
+          echo "${TELNET_SUMMARY_CRON} * * * $SRC /usr/bin/python3 /data/overlayFiles/telnet_checker.py --summary > /tmp/telnet_checker1.log 2>&1" >> "$CRON_FILE"
+          if [ "${K8S_ENABLED:-no}" = "yes" ]; then echo "00 07 * * * $SRC /usr/bin/python3 /data/overlayFiles/k8s_ssl_check.py > /tmp/k8s_ssl_check.log 2>&1" >> "$CRON_FILE"; fi
+          if [ "${TELNET_ENABLED:-no}" = "yes" ]; then echo "*/2 * * * * $SRC /usr/bin/python3 /data/overlayFiles/telnet_checker.py > /tmp/telnet_checker.log 2>&1" >> "$CRON_FILE"; fi
+          chmod 600 "$CRON_FILE"; chown root:crontab "$CRON_FILE" 2>/dev/null || true
+          crontab "$CRON_FILE"
+          cron -L 15
+          tail -f /var/log/cron.log
+        env:
+        - name: CALENDAR_REDIS_PUSH
+          value: '1'
+        - name: MQ_PORT
+          value: '5672'
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: REDIS_PASSWORD
+              name: bod-eod-le-vault-synced
+        - name: K8S_ENABLED
+          value: 'no'
+        - name: REDIS_PORT
+          value: '6379'
+        - name: TELNET_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              key: telnet_enabled
+              name: bod-env-details
+        - name: ALERT_WINDOW_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              key: alert_window_enabled
+              name: bod-env-details
+        - name: ALERT_WINDOW_START
+          valueFrom:
+            configMapKeyRef:
+              key: alert_window_start
+              name: bod-env-details
+        - name: ALERT_WINDOW_END
+          valueFrom:
+            configMapKeyRef:
+              key: alert_window_end
+              name: bod-env-details
+        - name: URL_SUMMARY_CRON
+          valueFrom:
+            configMapKeyRef:
+              key: url_summary_cron
+              name: bod-env-details
+        - name: TELNET_SUMMARY_CRON
+          valueFrom:
+            configMapKeyRef:
+              key: telnet_summary_cron
+              name: bod-env-details
+        - name: MQ_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: mq_host
+              name: bod-env-details
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: redis_host
+              name: bod-env-details
+        - name: NOTIFY_URL
+          value: http://apprise-notify-service/send-notification
+        - name: SITE_NAME
+          value: fs-dr-le
+        image: harbor.finspot.in/fs-dr-le/bod-eod-le:7
+        imagePullPolicy: Always
+        name: bod-eod-le
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/localtime
+          name: host-tz
+        - mountPath: /data/url.yaml
+          name: le
+          subPath: url.yaml
+        - mountPath: /data/telnet.yaml
+          name: le
+          subPath: telnet.yaml
+      dnsConfig:
+        nameservers:
+        - 10.99.182.137
+        options:
+        - name: ndots
+          value: '5'
+        searches:
+        - fs-dr-le.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      dnsPolicy: None
+      imagePullSecrets:
+      - name: finspot-registry
+      nodeSelector:
+        group: k8s-master
+        kubernetes.io/hostname: fs-dr-le
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: bod-eod-le
+      serviceAccountName: bod-eod-le
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /etc/localtime
+          type: ''
+        name: host-tz
+      - name: le
+        persistentVolumeClaim:
+          claimName: data-le
